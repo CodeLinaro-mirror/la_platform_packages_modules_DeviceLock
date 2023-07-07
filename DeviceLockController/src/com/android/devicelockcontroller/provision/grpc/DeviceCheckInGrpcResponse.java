@@ -28,7 +28,7 @@ import io.grpc.Status.Code;
  */
 abstract class DeviceCheckInGrpcResponse {
     @Nullable
-    Status mStatus = null;
+    Status mStatus;
 
     DeviceCheckInGrpcResponse() {
         mStatus = null;
@@ -51,7 +51,9 @@ abstract class DeviceCheckInGrpcResponse {
     }
 
     public boolean hasFatalError() {
-        return mStatus.getCode() != Code.OK && mStatus.getCode() != Code.UNAVAILABLE;
+        return mStatus != null
+                && mStatus.getCode() != Code.OK
+                && mStatus.getCode() != Code.UNAVAILABLE;
     }
 
     @Override
