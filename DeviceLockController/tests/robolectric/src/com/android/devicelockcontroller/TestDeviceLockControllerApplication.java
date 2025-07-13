@@ -60,7 +60,7 @@ public final class TestDeviceLockControllerApplication extends Application imple
         FcmRegistrationTokenProvider,
         PlayInstallPackageTaskClassProvider,
         StatsLoggerProvider,
-        FeatureFlagProvider{
+        FeatureFlagProvider {
 
     public static final String TEST_FCM_TOKEN = "fcmToken";
 
@@ -169,6 +169,11 @@ public final class TestDeviceLockControllerApplication extends Application imple
 
     @Override
     public boolean isImeiHardeningRegistrationEnabled() {
+        return false;
+    }
+
+    @Override
+    public boolean isImeiHardeningDeregistrationEnabled() {
         return false;
     }
 
