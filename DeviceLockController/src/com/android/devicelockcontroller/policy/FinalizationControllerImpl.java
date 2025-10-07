@@ -20,6 +20,7 @@ import static com.android.devicelockcontroller.policy.FinalizationControllerImpl
 import static com.android.devicelockcontroller.policy.FinalizationControllerImpl.FinalizationState.FINALIZED_UNREPORTED;
 import static com.android.devicelockcontroller.policy.FinalizationControllerImpl.FinalizationState.UNFINALIZED;
 import static com.android.devicelockcontroller.policy.FinalizationControllerImpl.FinalizationState.UNINITIALIZED;
+import static com.android.devicelockcontroller.policy.ProvisionStateController.ProvisionEvent.PROVISION_CLEAR;
 import static com.android.devicelockcontroller.provision.worker.AbstractCheckInWorker.BACKOFF_DELAY;
 import static com.android.devicelockcontroller.provision.worker.ReportDeviceLockProgramCompleteWorker.REPORT_DEVICE_LOCK_PROGRAM_COMPLETE_WORK_NAME;
 
@@ -43,13 +44,17 @@ import androidx.work.OneTimeWorkRequest;
 import androidx.work.Operation;
 import androidx.work.WorkManager;
 
+import com.android.devicelockcontroller.FeatureFlagProvider;
 import com.android.devicelockcontroller.SystemDeviceLockManager;
 import com.android.devicelockcontroller.SystemDeviceLockManagerImpl;
 import com.android.devicelockcontroller.provision.grpc.DeviceFinalizeClient.ReportDeviceProgramCompleteResponse;
 import com.android.devicelockcontroller.provision.worker.ReportDeviceLockProgramCompleteWorker;
 import com.android.devicelockcontroller.receivers.FinalizationBootCompletedReceiver;
 import com.android.devicelockcontroller.storage.GlobalParametersClient;
+import com.android.devicelockcontroller.storage.SetupParametersClient;
+import com.android.devicelockcontroller.storage.UserParameters;
 import com.android.devicelockcontroller.util.LogUtil;
+import com.android.devicelockcontroller.util.ThreadAsserts;
 
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
@@ -65,40 +70,18 @@ import java.util.concurrent.Executors;
 
 /**
  * Implementation of {@link FinalizationController} that finalizes the device by reporting the
- * state to the server and effectively disabling this application entirely.
+ * state to the server. Also provides method to disable this application entirely.
  */
 public final class FinalizationControllerImpl implements FinalizationController {
 
     private static final String TAG = FinalizationControllerImpl.class.getSimpleName();
-
-    @Target(ElementType.TYPE_USE)
-    @Retention(RetentionPolicy.SOURCE)
-    @IntDef({
-            UNFINALIZED,
-            FINALIZED_UNREPORTED,
-            FINALIZED,
-            UNINITIALIZED
-    })
-    public @interface FinalizationState {
-        /* Not finalized */
-        int UNFINALIZED = 0;
-
-        /* Device is finalized but still needs to report finalization to server */
-        int FINALIZED_UNREPORTED = 1;
-
-        /* Fully finalized. All bookkeeping is finished and okay to disable app. */
-        int FINALIZED = 2;
-
-        /* State has yet to be initialized */
-        int UNINITIALIZED = -1;
-    }
-
     /** Dispatch queue to guarantee state changes occur sequentially */
     private final FinalizationStateDispatchQueue mDispatchQueue;
     private final Executor mBgExecutor;
     private final Context mContext;
     private final SystemDeviceLockManager mSystemDeviceLockManager;
     private final Class<? extends ListenableWorker> mReportDeviceFinalizedWorkerClass;
+    private final FeatureFlagProvider mFeatureFlagProvider;
     private final Object mLock = new Object();
     /** Future for after initial finalization state is set from disk */
     private volatile ListenableFuture<Void> mStateInitializedFuture;
@@ -108,7 +91,8 @@ public final class FinalizationControllerImpl implements FinalizationController 
                 new FinalizationStateDispatchQueue(),
                 Executors.newCachedThreadPool(),
                 ReportDeviceLockProgramCompleteWorker.class,
-                SystemDeviceLockManagerImpl.getInstance());
+                SystemDeviceLockManagerImpl.getInstance(),
+                (FeatureFlagProvider) context.getApplicationContext());
     }
 
     @VisibleForTesting
@@ -117,13 +101,15 @@ public final class FinalizationControllerImpl implements FinalizationController 
             FinalizationStateDispatchQueue dispatchQueue,
             Executor bgExecutor,
             Class<? extends ListenableWorker> reportDeviceFinalizedWorkerClass,
-            SystemDeviceLockManager systemDeviceLockManager) {
+            SystemDeviceLockManager systemDeviceLockManager,
+            FeatureFlagProvider featureFlagProvider) {
         mContext = context;
         mDispatchQueue = dispatchQueue;
         mDispatchQueue.init(this::onStateChanged);
         mBgExecutor = bgExecutor;
         mReportDeviceFinalizedWorkerClass = reportDeviceFinalizedWorkerClass;
         mSystemDeviceLockManager = systemDeviceLockManager;
+        mFeatureFlagProvider = featureFlagProvider;
     }
 
     @Override
@@ -220,11 +206,15 @@ public final class FinalizationControllerImpl implements FinalizationController 
                 requestWorkToReportFinalized();
                 return persistStateFuture;
             case FINALIZED:
-                // Ensure disabling only happens after state is written to disk in case we somehow
-                // exit the disabled state and need to disable again.
-                return Futures.transformAsync(persistStateFuture,
-                        unused -> disableEntireApplication(),
-                        mBgExecutor);
+                if (mFeatureFlagProvider.isRecolEnabled()) {
+                    return Futures.transformAsync(persistStateFuture,
+                            unused -> returnDeviceToCleanState(),
+                            mBgExecutor);
+                } else {
+                    return Futures.transformAsync(persistStateFuture,
+                            unused -> Futures.transformAsync(cancelAllWorkersAndAlarms(),
+                                    unused2 -> disableApplication(), mBgExecutor), mBgExecutor);
+                }
             case UNINITIALIZED:
                 throw new IllegalArgumentException("This should only happen for a reset!");
             default:
@@ -269,10 +259,57 @@ public final class FinalizationControllerImpl implements FinalizationController 
     }
 
     /**
+     * Cancels all workers and alarms and resets storage parameters.
+     */
+    private ListenableFuture<Void> returnDeviceToCleanState() {
+        LogUtil.i(TAG, "Cancelling workers and alarms and resetting storage parameters.");
+
+        ListenableFuture<Void> resetStorageParametersFuture = Futures.submit(
+                this::resetStorageParameters, mBgExecutor);
+
+        final ProvisionStateController provisionController =
+                ((PolicyObjectsProvider) mContext.getApplicationContext())
+                        .getProvisionStateController();
+
+        ListenableFuture<Void> clearProvisionStateFuture = Futures.transformAsync(
+                resetStorageParametersFuture, unused ->
+                        provisionController.setNextStateForEvent(PROVISION_CLEAR), mBgExecutor);
+
+        return Futures.transformAsync(clearProvisionStateFuture,
+                unused -> cancelAllWorkersAndAlarms(), mBgExecutor);
+    }
+
+    /**
+     * Wipes all SharedPreferences for Setup, Global, and User parameters.
+     */
+    private void resetStorageParameters() {
+        ThreadAsserts.assertWorkerThread("resetStorageParameters");
+        LogUtil.i(TAG, "Resetting storage parameters");
+        final Context deviceContext = mContext.createDeviceProtectedStorageContext();
+
+        Futures.getUnchecked(GlobalParametersClient.getInstance().clear());
+        Futures.getUnchecked(SetupParametersClient.getInstance().clear());
+        UserParameters.clear(deviceContext);
+    }
+
+    /**
+     * Cancels all pending work and alarms.
+     */
+    private ListenableFuture<Void> cancelAllWorkersAndAlarms() {
+        LogUtil.i(TAG, "Cancelling all workers and alarms.");
+        WorkManager workManager = WorkManager.getInstance(mContext);
+        workManager.cancelAllWork();
+        AlarmManager alarmManager = mContext.getSystemService(AlarmManager.class);
+        alarmManager.cancelAll();
+        return Futures.immediateVoidFuture();
+    }
+
+    /**
      * Disables the entire device lock controller application.
      *
-     * <p>This will remove any work, alarms, receivers, etc., and this application should never run
-     * on the device again after this point.
+     * <p>This application should never run on the device again after this point.
+     *
+     * <p>Sets the persistent store finalized boolean to true.
      *
      * <p>This method returns a future but it is a bit of an odd case as the application itself may
      * end up disabled before/after the future is handled depending on when package manager enforces
@@ -280,11 +317,8 @@ public final class FinalizationControllerImpl implements FinalizationController 
      *
      * @return future for when this is done
      */
-    private ListenableFuture<Void> disableEntireApplication() {
-        WorkManager workManager = WorkManager.getInstance(mContext);
-        workManager.cancelAllWork();
-        AlarmManager alarmManager = mContext.getSystemService(AlarmManager.class);
-        alarmManager.cancelAll();
+    @Override
+    public ListenableFuture<Void> disableApplication() {
         // This kills and disables the app
         ListenableFuture<Void> disableApplicationFuture =
                 CallbackToFutureAdapter.getFuture(
@@ -311,5 +345,27 @@ public final class FinalizationControllerImpl implements FinalizationController 
                             return "Disable application future";
                         });
         return disableApplicationFuture;
+    }
+
+    @Target(ElementType.TYPE_USE)
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef({
+            UNFINALIZED,
+            FINALIZED_UNREPORTED,
+            FINALIZED,
+            UNINITIALIZED
+    })
+    public @interface FinalizationState {
+        /* Not finalized */
+        int UNFINALIZED = 0;
+
+        /* Device is finalized but still needs to report finalization to server */
+        int FINALIZED_UNREPORTED = 1;
+
+        /* Fully finalized. All bookkeeping is finished and okay to disable app. */
+        int FINALIZED = 2;
+
+        /* State has yet to be initialized */
+        int UNINITIALIZED = -1;
     }
 }

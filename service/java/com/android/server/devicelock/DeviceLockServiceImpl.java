@@ -99,7 +99,7 @@ final class DeviceLockServiceImpl extends IDeviceLockService.Stub {
             "com.android.devicelock.action.KEEPALIVE";
 
     // Workaround for timeout while adding the kiosk app as role holder for financing.
-    private static final int MAX_ADD_ROLE_HOLDER_TRIES = 4;
+    private static final int MAX_ADD_ROLE_HOLDER_TRIES = 12;
 
     private final Context mContext;
     private final ExecutorService mExecutorService;
@@ -679,8 +679,8 @@ final class DeviceLockServiceImpl extends IDeviceLockService.Stub {
         }
 
         final StringBuilder deviceSerialNumber = new StringBuilder();
-        if((deviceIdTypeBitmap & (1 << DEVICE_ID_TYPE_SERIAL_NUMBER)) != 0){
-            if(Build.getSerial() != Build.UNKNOWN){
+        if ((deviceIdTypeBitmap & (1 << DEVICE_ID_TYPE_SERIAL_NUMBER)) != 0) {
+            if (Build.getSerial() != Build.UNKNOWN) {
                 deviceSerialNumber.append(Build.getSerial());
             }
         }
@@ -689,30 +689,27 @@ final class DeviceLockServiceImpl extends IDeviceLockService.Stub {
             @Override
             public void onResult(String deviceId) {
                 Slog.i(TAG, "Get Device ID ");
+
+                int deviceIdType = -1;
+
+                if (!imeiList.isEmpty()) {
+                    deviceIdType = DEVICE_ID_TYPE_IMEI;
+                } else if (!meidList.isEmpty()) {
+                    deviceIdType = DEVICE_ID_TYPE_MEID;
+                } else if (!deviceSerialNumber.isEmpty()) {
+                    deviceIdType = DEVICE_ID_TYPE_SERIAL_NUMBER;
+                }
+
                 try {
-                    if (meidList.contains(deviceId)) {
-                        callback.onDeviceIdReceived(DEVICE_ID_TYPE_MEID, deviceId);
-                        return;
+                    if (deviceIdType == -1) {
+                        Exception exception = new Exception(
+                                "Unable to get device id: Unspecified ID type");
+                        callback.onError(new ParcelableException(exception));
                     }
-                    if (imeiList.contains(deviceId)) {
-                        callback.onDeviceIdReceived(DEVICE_ID_TYPE_IMEI, deviceId);
-                        return;
-                    }
-                    if(!deviceSerialNumber.isEmpty() &&
-                            deviceId.equals(deviceSerialNumber.toString())){
-                        callback.onDeviceIdReceived(DEVICE_ID_TYPE_SERIAL_NUMBER,
-                                deviceId.toString());
-                        return;
-                    }
-                    // When a device ID is returned from DLC App, but none of the IDs got from
-                    // TelephonyManager matches that device ID.
-                    //
-                    // TODO(b/270392813): Send the device ID back to the callback with
-                    //  UNSPECIFIED device ID type.
-                    Exception exception = new Exception("Unable to get device id");
-                    callback.onError(new ParcelableException(exception));
-                } catch (RemoteException e) {
-                    Slog.e(TAG, "getDeviceId() - Unable to send result to the callback", e);
+
+                    callback.onDeviceIdReceived(deviceIdType, deviceId);
+                } catch (RemoteException ex) {
+                    Slog.e(TAG, "An error occurred sending the deviceId through the callback");
                 }
             }
 
@@ -779,7 +776,7 @@ final class DeviceLockServiceImpl extends IDeviceLockService.Stub {
     }
 
     @Override
-    public void getEnrollmentType(@NonNull IGetEnrollmentTypeCallback callback){
+    public void getEnrollmentType(@NonNull IGetEnrollmentTypeCallback callback) {
         if (mContext.checkCallingOrSelfPermission(
                 Manifest.permission.GET_DEVICE_LOCK_ENROLLMENT_TYPE) != PERMISSION_GRANTED) {
             try {
@@ -849,6 +846,16 @@ final class DeviceLockServiceImpl extends IDeviceLockService.Stub {
                     if (accepted || remainingTries == 1) {
                         reportResult(accepted, identity, remoteCallback);
                     } else {
+                        // Check if the role is already added.
+                        if (mRoleManager.getRoleHoldersAsUser(
+                                        RoleManager.ROLE_FINANCED_DEVICE_KIOSK, userHandle).
+                                contains(packageName)) {
+                            Slog.w(TAG, "Role (" +
+                                    RoleManager.ROLE_FINANCED_DEVICE_KIOSK + ") already added for "
+                                    + packageName);
+                            return;
+                        }
+
                         final int retryNumber = MAX_ADD_ROLE_HOLDER_TRIES - remainingTries + 1;
                         Slog.w(TAG, "Retrying adding financed device role to kiosk app (retry "
                                 + retryNumber + ")");

@@ -59,7 +59,8 @@ public final class TestDeviceLockControllerApplication extends Application imple
         DeviceLockControllerSchedulerProvider,
         FcmRegistrationTokenProvider,
         PlayInstallPackageTaskClassProvider,
-        StatsLoggerProvider {
+        StatsLoggerProvider,
+        FeatureFlagProvider {
 
     public static final String TEST_FCM_TOKEN = "fcmToken";
 
@@ -71,6 +72,7 @@ public final class TestDeviceLockControllerApplication extends Application imple
     private SetupParametersClient mSetupParametersClient;
     private GlobalParametersClient mGlobalParametersClient;
     private StatsLogger mStatsLogger;
+    private FeatureFlagProvider mFeatureFlagProvider;
 
     @Override
     public DeviceStateController getDeviceStateController() {
@@ -116,6 +118,16 @@ public final class TestDeviceLockControllerApplication extends Application imple
         return mStatsLogger;
     }
 
+    /**
+     * Returns a mock {@link FeatureFlagProvider} for testing purposes.
+     */
+    public synchronized FeatureFlagProvider getFeatureFlagProvider() {
+        if (mFeatureFlagProvider == null) {
+            mFeatureFlagProvider = mock(FeatureFlagProvider.class);
+        }
+        return mFeatureFlagProvider;
+    }
+
     @Override
     @NonNull
     public ListenableFuture<String> getFcmRegistrationToken() {
@@ -150,6 +162,7 @@ public final class TestDeviceLockControllerApplication extends Application imple
     public void afterTest(Method method) {
         GlobalParametersClient.reset();
         SetupParametersClient.reset();
+        mFeatureFlagProvider = null;
     }
 
     @Override
@@ -164,6 +177,21 @@ public final class TestDeviceLockControllerApplication extends Application imple
     @Override
     public Class<? extends ListenableWorker> getPlayInstallPackageTaskClass() {
         return PlayInstallPackageWorker.class;
+    }
+
+    @Override
+    public boolean isImeiHardeningRegistrationEnabled() {
+        return false;
+    }
+
+    @Override
+    public boolean isImeiHardeningDeregistrationEnabled() {
+        return false;
+    }
+
+    @Override
+    public boolean isRecolEnabled() {
+        return getFeatureFlagProvider().isRecolEnabled();
     }
 
     /**

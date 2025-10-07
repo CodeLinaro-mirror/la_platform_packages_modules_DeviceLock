@@ -18,6 +18,7 @@ package com.android.devicelockcontroller.policy;
 
 import static com.android.devicelockcontroller.activities.ProvisioningActivity.EXTRA_SHOW_CRITICAL_PROVISION_FAILED_UI_ON_START;
 import static com.android.devicelockcontroller.common.DeviceLockConstants.ACTION_START_DEVICE_FINANCING_PROVISIONING;
+import static com.android.devicelockcontroller.common.DeviceLockConstants.ACTION_START_DEVICE_RECOL_PROVISIONING;
 import static com.android.devicelockcontroller.common.DeviceLockConstants.ACTION_START_DEVICE_SUBSIDY_PROVISIONING;
 import static com.android.devicelockcontroller.policy.DeviceStateController.DeviceState.CLEARED;
 import static com.android.devicelockcontroller.policy.DeviceStateController.DeviceState.LOCKED;
@@ -48,12 +49,12 @@ import androidx.work.Operation;
 import androidx.work.OutOfQuotaPolicy;
 import androidx.work.WorkManager;
 
+import com.android.devicelockcontroller.FeatureFlagProvider;
 import com.android.devicelockcontroller.SystemDeviceLockManager;
 import com.android.devicelockcontroller.activities.LandingActivity;
 import com.android.devicelockcontroller.activities.ProvisioningActivity;
 import com.android.devicelockcontroller.common.DeviceLockConstants;
 import com.android.devicelockcontroller.common.DeviceLockConstants.ProvisioningType;
-import com.android.devicelockcontroller.policy.DevicePolicyController.LockTaskType;
 import com.android.devicelockcontroller.policy.DeviceStateController.DeviceState;
 import com.android.devicelockcontroller.policy.ProvisionStateController.ProvisionState;
 import com.android.devicelockcontroller.provision.worker.ReportDeviceProvisionStateWorker;
@@ -96,16 +97,17 @@ public final class DevicePolicyControllerImpl implements DevicePolicyController 
     private final ProvisionStateController mProvisionStateController;
     private final Executor mBgExecutor;
     private final UserManager mUserManager;
+    private final FeatureFlagProvider mFeatureFlagProvider;
 
     /**
      * Create a new policy controller.
      *
-     * @param context The context used by this policy controller.
-     * @param devicePolicyManager The device policy manager.
-     * @param userManager The user manager.
-     * @param systemDeviceLockManager The system device lock manager.
+     * @param context                  The context used by this policy controller.
+     * @param devicePolicyManager      The device policy manager.
+     * @param userManager              The user manager.
+     * @param systemDeviceLockManager  The system device lock manager.
      * @param provisionStateController The provision state controller.
-     * @param bgExecutor The background executor.
+     * @param bgExecutor               The background executor.
      */
     public DevicePolicyControllerImpl(
             Context context,
@@ -151,6 +153,7 @@ public final class DevicePolicyControllerImpl implements DevicePolicyController 
         mBgExecutor = bgExecutor;
         mDpm = devicePolicyManager;
         mUserManager = userManager;
+        mFeatureFlagProvider = (FeatureFlagProvider) context.getApplicationContext();
         mPolicyList.add(userRestrictionsPolicyHandler);
         mPolicyList.add(appOpsPolicyHandler);
         mPolicyList.add(lockTaskModePolicyHandler);
@@ -164,6 +167,19 @@ public final class DevicePolicyControllerImpl implements DevicePolicyController 
     @Override
     public boolean wipeDevice() {
         LogUtil.i(TAG, "Wiping device");
+        if (mFeatureFlagProvider.isRecolEnabled()) {
+            try {
+                @ProvisioningType int provisioningType =
+                        SetupParametersClient.getInstance().getProvisioningType().get();
+                if (provisioningType == ProvisioningType.TYPE_RECOL) {
+                    LogUtil.w(TAG, "Wipe is not allowed for recol provisioning type");
+                    return false;
+                }
+            } catch (java.util.concurrent.ExecutionException | InterruptedException e) {
+                // TODO: b/438125704 - Handle this edge case in a more robust way.
+                LogUtil.e(TAG, "Failed to get provisioning type, proceeding with wipe.", e);
+            }
+        }
         try {
             mDpm.wipeDevice(
                     DevicePolicyManager.WIPE_SILENTLY
@@ -417,6 +433,11 @@ public final class DevicePolicyControllerImpl implements DevicePolicyController 
                                     ACTION_START_DEVICE_FINANCING_PROVISIONING);
                         case ProvisioningType.TYPE_SUBSIDY:
                             return resultIntent.setAction(ACTION_START_DEVICE_SUBSIDY_PROVISIONING);
+                        case ProvisioningType.TYPE_RECOL:
+                            if (mFeatureFlagProvider.isRecolEnabled()) {
+                                return resultIntent
+                                        .setAction(ACTION_START_DEVICE_RECOL_PROVISIONING);
+                            }
                         case ProvisioningType.TYPE_UNDEFINED:
                         default:
                             throw new IllegalArgumentException("Provisioning type is unknown!");
@@ -498,13 +519,13 @@ public final class DevicePolicyControllerImpl implements DevicePolicyController 
                         LogUtil.i(TAG, "Current LockTaskType: " + type);
                         return type == LockTaskType.UNDEFINED
                                 ? Futures.transform(
-                                        enforceCurrentPoliciesAndResolveLockTaskType(
-                                                /* failure= */ false),
-                                        mode -> {
-                                            startLockTaskModeIfNeeded(mode);
-                                            return mode;
-                                        },
-                                        mBgExecutor)
+                                enforceCurrentPoliciesAndResolveLockTaskType(
+                                        /* failure= */ false),
+                                    mode -> {
+                                        startLockTaskModeIfNeeded(mode);
+                                        return mode;
+                                    },
+                                mBgExecutor)
                                 : Futures.immediateFuture(type);
                     },
                     mBgExecutor);

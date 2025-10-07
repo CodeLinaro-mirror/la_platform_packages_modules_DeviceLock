@@ -95,11 +95,13 @@ public final class DeviceLockConstants {
             ProvisioningType.TYPE_UNDEFINED,
             ProvisioningType.TYPE_FINANCED,
             ProvisioningType.TYPE_SUBSIDY,
+            ProvisioningType.TYPE_RECOL,
     })
     public @interface ProvisioningType {
         int TYPE_UNDEFINED = 0;
         int TYPE_FINANCED = 1;
         int TYPE_SUBSIDY = 2;
+        int TYPE_RECOL = 3;
     }
 
     @Retention(RetentionPolicy.SOURCE)
@@ -162,6 +164,9 @@ public final class DeviceLockConstants {
     public static final String ACTION_START_DEVICE_SUBSIDY_PROVISIONING =
             "com.android.devicelockcontroller.action.START_DEVICE_SUBSIDY_PROVISIONING";
 
+    public static final String ACTION_START_DEVICE_RECOL_PROVISIONING =
+            "com.android.devicelockcontroller.action.START_DEVICE_RECOL_PROVISIONING";
+
     /** Definitions for device provision states. */
     @Retention(RetentionPolicy.SOURCE)
     @IntDef(
@@ -172,6 +177,8 @@ public final class DeviceLockConstants {
                     DeviceProvisionState.PROVISION_STATE_PERSISTENT_UI,
                     DeviceProvisionState.PROVISION_STATE_FACTORY_RESET,
                     DeviceProvisionState.PROVISION_STATE_SUCCESS,
+                    DeviceProvisionState.PROVISION_STATE_ENABLE_BOTTOM_VIEW,
+                    DeviceProvisionState.PROVISION_STATE_CHECKIN,
             })
     public @interface DeviceProvisionState {
         /** The provision state of the device is unspecified */
@@ -192,6 +199,15 @@ public final class DeviceLockConstants {
         int PROVISION_STATE_FACTORY_RESET = 4;
         /** Device provisioning was a success. */
         int PROVISION_STATE_SUCCESS = 5;
+        /**
+         * The Device Lock Android client should display the bottom view in the Progress Fragment,
+         * allowing the user to either retry or exit provisioning.
+         */
+        int PROVISION_STATE_ENABLE_BOTTOM_VIEW = 6;
+        /**
+         * The Device Lock Android client should check in with the server.
+         */
+        int PROVISION_STATE_CHECKIN = 7;
     }
 
     /** Prevent instantiation. */
