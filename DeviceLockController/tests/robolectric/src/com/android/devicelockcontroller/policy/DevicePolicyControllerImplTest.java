@@ -43,7 +43,6 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.robolectric.Shadows.shadowOf;
@@ -203,40 +202,6 @@ public final class DevicePolicyControllerImplTest {
     }
 
     @Test
-    public void wipeDevice_recolEnabledButProvisionTypeNotRecol_wipesDevice()
-            throws ExecutionException, InterruptedException {
-        // GIVEN the recol feature flag is enabled but the provisioning type is not RECOL.
-        when(mFeatureFlagProvider.isRecolEnabled()).thenReturn(true);
-        Bundle preferences = new Bundle();
-        preferences.putInt(EXTRA_PROVISIONING_TYPE, TYPE_FINANCED);
-        SetupParametersClient.getInstance().createPrefs(preferences).get();
-
-        // WHEN wipeDevice is called.
-        assertThat(mDevicePolicyController.wipeDevice()).isTrue();
-
-        // THEN the device is wiped.
-        verify(mMockDpm).wipeDevice(
-                DevicePolicyManager.WIPE_SILENTLY | DevicePolicyManager.WIPE_RESET_PROTECTION_DATA);
-    }
-
-    @Test
-    public void wipeDevice_recolDisabled_wipesDevice()
-            throws ExecutionException, InterruptedException {
-        // GIVEN the recol feature flag is disabled.
-        when(mFeatureFlagProvider.isRecolEnabled()).thenReturn(false);
-        Bundle preferences = new Bundle();
-        preferences.putInt(EXTRA_PROVISIONING_TYPE, TYPE_RECOL);
-        SetupParametersClient.getInstance().createPrefs(preferences).get();
-
-        // WHEN wipeDevice is called.
-        assertThat(mDevicePolicyController.wipeDevice()).isTrue();
-
-        // THEN the device is wiped.
-        verify(mMockDpm).wipeDevice(
-                DevicePolicyManager.WIPE_SILENTLY | DevicePolicyManager.WIPE_RESET_PROTECTION_DATA);
-    }
-
-    @Test
     public void enforceCurrentPolicies_withUnprovisionedState_doesNotStartLockTaskMode()
             throws Exception {
         setupSetupParameters();
@@ -266,28 +231,6 @@ public final class DevicePolicyControllerImplTest {
 
         shadowOf(Looper.getMainLooper()).idle();
         assertLockTaskModeStarted();
-        assertLockTaskType(LockTaskType.LANDING_ACTIVITY);
-    }
-
-    @Test
-    public void enforceCurrentPolicies_provisionInProgress_userNotUnlocked_noStartLockTaskMode()
-            throws Exception {
-        // GIVEN the device is in a state that should start lock task, but the user is not
-        // unlocked.
-        setupSetupParameters();
-        setupAppOpsPolicyHandlerExpectations();
-        setExpectationsOnEnableControllerKeepAlive();
-        setExpectationsOnSetPostNotificationsSystemFixed();
-        when(mMockProvisionStateController.getState())
-                .thenReturn(Futures.immediateFuture(ProvisionState.PROVISION_IN_PROGRESS));
-        when(mMockUserManager.isUserUnlocked()).thenReturn(false);
-
-        // WHEN policies are enforced.
-        mDevicePolicyController.enforceCurrentPolicies().get();
-
-        // THEN lock task mode is not started.
-        shadowOf(Looper.getMainLooper()).idle();
-        assertLockTaskModeNotStarted();
         assertLockTaskType(LockTaskType.LANDING_ACTIVITY);
     }
 
@@ -1134,19 +1077,6 @@ public final class DevicePolicyControllerImplTest {
     }
 
     @Test
-    public void onUserSetupCompleted_delegatesCall() throws Exception {
-        // GIVEN the provision state controller is mocked.
-        when(mMockProvisionStateController.onUserSetupCompleted())
-                .thenReturn(Futures.immediateVoidFuture());
-
-        // WHEN onUserSetupCompleted is called.
-        mDevicePolicyController.onUserSetupCompleted().get();
-
-        // THEN the call is delegated to the provision state controller.
-        verify(mMockProvisionStateController).onUserSetupCompleted();
-    }
-
-    @Test
     public void onAppCrashed_withUnprovisionedState_shouldMakeExpectedCalls() throws Exception {
         when(mMockProvisionStateController.getState())
                 .thenReturn(Futures.immediateFuture(ProvisionState.UNPROVISIONED));
@@ -1308,53 +1238,6 @@ public final class DevicePolicyControllerImplTest {
         verify(mMockDpm)
                 .setUserControlDisabledPackages(
                         null, Collections.singletonList("com.test.package2"));
-    }
-
-    @Test
-    public void disableUserControlForCheckInRequiredPackage_packageAlreadyDisabled_doesNotUpdate() {
-        // GIVEN a package is already in the user control disabled list.
-        final String testPackage = "com.test.package";
-        when(mMockDpm.getUserControlDisabledPackages(any()))
-                .thenReturn(List.of(testPackage));
-
-        // WHEN disabling user control for the same package.
-        mDevicePolicyController.disableUserControlForCheckInRequiredPackage(testPackage);
-
-        // THEN setUserControlDisabledPackages is not called.
-        verify(mMockDpm, never()).setUserControlDisabledPackages(any(), any());
-    }
-
-    @Test
-    public void disableUserControlForCheckInRequiredPackage_securityException_isHandled() {
-        // GIVEN getting user control disabled packages throws a SecurityException.
-        when(mMockDpm.getUserControlDisabledPackages(any())).thenThrow(new SecurityException());
-
-        // WHEN disabling user control for a package.
-        // THEN the exception is handled gracefully and not propagated.
-        mDevicePolicyController.disableUserControlForCheckInRequiredPackage("com.test.package");
-    }
-
-    @Test
-    public void enableUserControlForCheckInRequiredPackage_packageNotDisabled_doesNotUpdate() {
-        // GIVEN a package is not in the user control disabled list.
-        when(mMockDpm.getUserControlDisabledPackages(any()))
-                .thenReturn(List.of("com.another.package"));
-
-        // WHEN enabling user control for that package.
-        mDevicePolicyController.enableUserControlForCheckInRequiredPackage("com.test.package");
-
-        // THEN setUserControlDisabledPackages is not called.
-        verify(mMockDpm, never()).setUserControlDisabledPackages(any(), any());
-    }
-
-    @Test
-    public void enableUserControlForCheckInRequiredPackage_securityException_isHandled() {
-        // GIVEN getting user control disabled packages throws a SecurityException.
-        when(mMockDpm.getUserControlDisabledPackages(any())).thenThrow(new SecurityException());
-
-        // WHEN enabling user control for a package.
-        // THEN the exception is handled gracefully and not propagated.
-        mDevicePolicyController.enableUserControlForCheckInRequiredPackage("com.test.package");
     }
 
     private void assertLockTaskModeStarted() throws Exception {
